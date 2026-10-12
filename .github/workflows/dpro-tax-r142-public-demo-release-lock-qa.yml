@@ -1,0 +1,223 @@
+name: DPRO TAX R142 Synthetic Demo Continuous Release Lock QA
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'R117_DEMO_*'
+      - 'index.html'
+      - '.github/workflows/dpro-tax-r142-public-demo-release-lock-qa.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'R117_DEMO_*'
+      - 'index.html'
+      - '.github/workflows/dpro-tax-r142-public-demo-release-lock-qa.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dpro-tax-r142-public-demo-readonly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  r142-release-lock-qa:
+    if: ${{ github.repository == 'dpromstk2000-lab/dpro-tax-demo' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Read-only checkout of the standalone synthetic demo
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify allowed surface and JS syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ github.repository }}" = 'dpromstk2000-lab/dpro-tax-demo'
+          node --version
+          python3 --version
+          node --check R117_DEMO_engine.js
+          node --check R117_DEMO_ui.js
+          test -f index.html
+          test -f R117_DEMO_styles.css
+          echo 'R142_SOURCE_STRUCTURE_AND_JS_SYNTAX_OK'
+
+      - name: R142 pinned 9-file static and no-network QA
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/r142_static.py" <<'PY'
+          #!/usr/bin/env python3
+          """Read-only structural QA for DPRO TAX's separate fully-fictional public demo repository."""
+          from html.parser import HTMLParser
+          from pathlib import Path
+          import re,sys,json,hashlib
+          ROOT=Path(sys.argv[1] if len(sys.argv)>1 else '.')
+          FILES=['index.html','R117_DEMO_index.html','R117_DEMO_owner.html','R117_DEMO_member.html','R117_DEMO_owner-ipad.html','R117_DEMO_system-check.html']
+          BLOBS={
+          'R117_DEMO_engine.js':'ffcf8c50d9675263ecaf7e80c3b4db450d7e57fa',
+          'R117_DEMO_index.html':'66c979db6d6011032384509f501026af018c996d',
+          'R117_DEMO_member.html':'01936d9bc4721f5af269c209e81033bb42490437',
+          'R117_DEMO_owner-ipad.html':'05b07ba4063c3415da52b8be5f1c7fba98a11ea4',
+          'R117_DEMO_owner.html':'7feadc4fdc3f1d46c0ab3a0858d450e2496a77fe',
+          'R117_DEMO_styles.css':'7030d8a7b42d08ae6b658e45e5ecf3811c47b6ac',
+          'R117_DEMO_system-check.html':'c387b0781210d153f0020cfc3c55cb7c7de97320',
+          'R117_DEMO_ui.js':'0a004785a3670bf6286e38f459a3ccf170c41679',
+          'index.html':'631e29a218585cb61ce7a199cf48b5d179f9da3a',
+          }
+          class P(HTMLParser):
+           def __init__(self):super().__init__();self.tags=[]
+           def handle_starttag(self,tag,attrs):self.tags.append((tag,dict(attrs)))
+          passed=[];failed=[]
+          def check(n,v):
+           (passed if v else failed).append(n)
+           if not v:print('FAIL',n)
+           else:print('PASS',n)
+          
+          for f,h in BLOBS.items():
+           d=(ROOT/f).read_bytes();actual=hashlib.sha1(('blob '+str(len(d))+'\0').encode()+d).hexdigest()
+           check('blob_pinned_'+f,actual==h)
+          for f in FILES:
+           s=(ROOT/f).read_text('utf8');p=P();p.feed(s)
+           csp=[attr.get('content','') for tag,attr in p.tags if tag=='meta' and attr.get('http-equiv','').lower()=='content-security-policy']
+           check('one_csp_'+f,len(csp)==1)
+           for name,clause in [('no_default_network',"default-src 'none'"),('no_connection',"connect-src 'none'"),('no_submit',"form-action 'none'"),('no_frames',"frame-src 'none'")]:check(name+'_'+f,len(csp)==1 and clause in csp[0])
+           src=[attrs for tag,attrs in p.tags if tag in ('script','link') and any(str(attrs.get(k,'')).startswith(('https://','http://')) for k in ('src','href'))]
+           check('local_assets_only_'+f,len(src)==0)
+           check('no_online_tracker_'+f,not re.search(r'googletagmanager|google-analytics|facebook\.com/tr',s,re.I))
+          
+          landing=(ROOT/'index.html').read_text('utf8')
+          shell=(ROOT/'R117_DEMO_index.html').read_text('utf8')
+          engine=(ROOT/'R117_DEMO_engine.js').read_text('utf8')
+          ui=(ROOT/'R117_DEMO_ui.js').read_text('utf8')
+          js=engine+ui
+          check('public_pin_1234_in_landing','1234' in landing)
+          check('synthetic_notice_in_landing','実際の予約' in landing and '架空' in landing)
+          check('warn_real_personal_data','実際の個人情報' in landing)
+          check('entry_demo_param','R117_DEMO_index.html?demo=1' in landing)
+          for route in ['dashboard','clients','ipad','member','booking','inquiry','systemcheck']:
+           check('seven_routes_'+route,'data-view="'+route+'"' in shell)
+          check('reset_button','id="reset-demo"' in shell)
+          check('demo_query_required',"get('demo')==='1'" in ui)
+          check('local_mode','SYNTHETIC_ONLY' in engine)
+          check('local_only_origin','https://only-local.invalid' in engine)
+          check('booking_30_minutes','duration_minutes:30' in engine or 'duration_minutes: 30' in engine)
+          check('no_http_transport_in_js',not re.search(r'\bfetch\s*\(|XMLHttpRequest|WebSocket|EventSource',js))
+          check('no_browser_storage_in_js',not re.search(r'\blocalStorage\b|\bsessionStorage\b|\bindexedDB\b|\bdocument\.cookie\b',js))
+          check('no_live_line_in_js',not re.search(r'api\.line\.me|liff\.init\s*\(',js))
+          check('responsive_css_has_media', '@media' in (ROOT/'R117_DEMO_styles.css').read_text('utf8'))
+          print('R142_PUBLIC_STATIC_QA',len(passed),'PASS',len(failed),'FAIL')
+          if failed:sys.exit(1)
+          PY
+          python3 "$RUNNER_TEMP/r142_static.py" "$GITHUB_WORKSPACE"
+
+      - name: R142 55 synthetic-only booking and authorization regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/r142_unit.cjs" <<'NODE'
+          'use strict';
+          // R141: isolated runtime regression tests for THE EXACT PUBLISHED synthetic demo JS blob.
+          // This test never imports network/DB/storage/LINE dependencies; no customer data is needed.
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const vm = require('node:vm');
+          const crypto = require('node:crypto');
+          const path = require('node:path');
+          const enginePath = process.argv[2] || path.join(__dirname,'R117_DEMO_engine.js');
+          const code = fs.readFileSync(enginePath,'utf8');
+          const sha = crypto.createHash('sha1').update(`blob ${Buffer.byteLength(code)}\0`).update(code).digest('hex');
+          const EXPECTED_SHA='ffcf8c50d9675263ecaf7e80c3b4db450d7e57fa';
+          assert.equal(sha,EXPECTED_SHA,'Only the published R133/R136 demo engine is accepted');
+          for(const forbidden of [/\bfetch\s*\(/, /\bXMLHttpRequest\b/, /\bWebSocket\b/, /\blocalStorage\b/, /\bsessionStorage\b/, /\bdocument\.cookie\b/])assert.equal(forbidden.test(code),false,`Forbidden browser I/O: ${forbidden}`);
+          const context={URL,URLSearchParams,Date,Intl,Map,Set,console};
+          vm.runInNewContext(code,context,{filename:'published-demo-engine.js',timeout:10000});
+          const make=(now='2026-10-11T12:30:00+09:00')=>context.DPRO_TAX_DEMO_ENGINE.createDemoSession({now});
+          const S=make();
+          const get=(p,opt)=>S.request(p,opt);
+          const admin=(p,opt={})=>get(p,{adminKey:'1234',...opt});
+          let passed=0;
+          function ok(title,f){try{f();passed++;console.log('PASS '+String(passed).padStart(2,'0')+' '+title);}catch(e){console.error('FAIL '+title+' '+e.stack);process.exitCode=1;}}
+          function reject(title,cb,code){ok(title,()=>assert.throws(cb,e=>Boolean(e&&e.code===code),`expected ${code}`));}
+          const clone=x=>JSON.parse(JSON.stringify(x));
+          ok('engine exposes memory-only session factory',()=>assert.equal(S.mode,'SYNTHETIC_ONLY'));
+          ok('isolated health responds',()=>assert.equal(get('/api/health').ok,true));
+          ok('office only synthetic',()=>assert.equal(get('/api/public/office').office.is_demo,true));
+          const days=get('/api/demo/dates').dates;
+          ok('future business date 2026-10-13 exists',()=>assert.equal(days[0],'2026-10-13'));
+          ok('sports day 2026-10-12 excluded',()=>assert(!days.includes('2026-10-12')));
+          ok('non-business Sunday excluded',()=>assert(!days.includes('2026-10-11')));
+          ok('national holiday 2026-11-03 excluded',()=>assert(!days.includes('2026-11-03')));
+          ok('new year 2027-01-01 excluded',()=>assert(!days.includes('2027-01-01')));
+          ok('date list bounded by 90 calendar days',()=>assert(days.length<90 && days.length>30));
+          const slots=get('/api/demo/slots?date=2026-10-13').slots;
+          ok('30-min slots only',()=>assert(slots.every(x=>x.duration_minutes===30 && /:(00|30)$/.test(x.time))));
+          ok('working hours limited 09:00-16:30',()=>assert(slots.every(x=>x.time>='09:00' && x.time<='16:30')));
+          ok('sample booking 10:00 not double offered',()=>assert(!slots.some(x=>x.time==='10:00')));
+          ok('09:00 initially offered',()=>assert(slots.some(x=>x.time==='09:00')));
+          ok('holiday slots unavailable',()=>assert.equal(get('/api/demo/slots?date=2026-10-12').slots.length,0));
+          ok('past slots unavailable',()=>assert.equal(get('/api/demo/slots?date=2026-10-10').slots.length,0));
+          ok('client preview is synthetic',()=>assert.equal(get('/api/demo/member-preview').client.is_demo,true));
+          ok('client preview uploads disabled',()=>assert.equal(get('/api/demo/member-preview').uploads_disabled,true));
+          ok('client preview scoped',()=>{let x=get('/api/demo/member-preview');assert(x.cases.every(y=>y.client_id===x.client.id));assert(x.appointments.every(y=>y.client_id===x.client.id));});
+          reject('admin requires code',()=>get('/api/admin/dashboard'),'DEMO_ADMIN_KEY_REQUIRED');
+          ok('1234 grants dashboard mock',()=>assert.equal(admin('/api/admin/dashboard').ok,true));
+          reject('ipad requires code',()=>get('/api/demo/ipad'),'DEMO_ADMIN_KEY_REQUIRED');
+          ok('ipad is mock only',()=>assert.equal(admin('/api/demo/ipad').approval_enabled,false));
+          reject('member real endpoint denied',()=>admin('/api/member/profile'),'DEMO_SIDE_EFFECT_BLOCKED');
+          reject('production-style legacy mutation denied',()=>admin('/api/admin/document-requests',{method:'POST',body:{title:'x'}}),'DEMO_SIDE_EFFECT_BLOCKED');
+          reject('cross origin explicitly denied',()=>admin('https://example.com/api/admin/dashboard'),'DEMO_SIDE_EFFECT_BLOCKED');
+          reject('booking without date denied',()=>get('/api/demo/booking',{method:'POST',body:{date:'',time:'09:00'}}),'BOOKING_SLOT_UNAVAILABLE');
+          reject('booking at sample time denied',()=>get('/api/demo/booking',{method:'POST',body:{date:'2026-10-13',time:'10:00'}}),'BOOKING_SLOT_UNAVAILABLE');
+          reject('non-30min booking denied',()=>get('/api/demo/booking',{method:'POST',body:{date:'2026-10-13',time:'09:15'}}),'BOOKING_SLOT_UNAVAILABLE');
+          reject('after-hours booking denied',()=>get('/api/demo/booking',{method:'POST',body:{date:'2026-10-13',time:'18:00'}}),'BOOKING_SLOT_UNAVAILABLE');
+          reject('holiday booking denied',()=>get('/api/demo/booking',{method:'POST',body:{date:'2026-10-12',time:'09:00'}}),'BOOKING_SLOT_UNAVAILABLE');
+          reject('phone in booking denied',()=>get('/api/demo/booking',{method:'POST',body:{date:'2026-10-13',time:'09:00',phone:'09012345678'}}),'DEMO_PERSONAL_DATA_FORBIDDEN');
+          reject('email in booking denied',()=>get('/api/demo/booking',{method:'POST',body:{date:'2026-10-13',time:'09:00',email:'a@b.com'}}),'DEMO_PERSONAL_DATA_FORBIDDEN');
+          reject('office foreign key denied',()=>get('/api/demo/booking',{method:'POST',body:{date:'2026-10-13',time:'09:00',office_id:'evil'}}),'DEMO_SCOPE_DENIED');
+          reject('password in booking denied',()=>get('/api/demo/booking',{method:'POST',body:{date:'2026-10-13',time:'09:00',password:'secret'}}),'REAL_DATA_PROHIBITED');
+          const firstBooking=get('/api/demo/booking',{method:'POST',body:{date:'2026-10-13',time:'09:00',purpose:'架空の面談'}});
+          ok('valid synthetic booking accepted',()=>assert.equal(firstBooking.appointment.status,'requested'));
+          ok('synthetic booking fixed 30 minutes',()=>assert.equal(firstBooking.appointment.duration_minutes,30));
+          ok('synthetic booking not real submission',()=>assert(firstBooking.notice.includes('実際の予約ではありません')));
+          reject('duplicate synthetic booking denied',()=>get('/api/demo/booking',{method:'POST',body:{date:'2026-10-13',time:'09:00'}}),'BOOKING_SLOT_UNAVAILABLE');
+          ok('available slot removed after booking',()=>assert(!get('/api/demo/slots?date=2026-10-13').slots.some(x=>x.time==='09:00')));
+          reject('real contact in inquiry denied',()=>get('/api/demo/inquiry',{method:'POST',body:{subject:'架空',body:'架空',email:'sample@example.test'}}),'DEMO_PERSONAL_DATA_FORBIDDEN');
+          reject('empty inquiry subject denied',()=>get('/api/demo/inquiry',{method:'POST',body:{subject:' ',body:'架空です'}}),'SUBJECT_INVALID');
+          reject('invalid inquiry category denied',()=>get('/api/demo/inquiry',{method:'POST',body:{subject:'架空',body:'テスト',category:'unapproved'}}),'CATEGORY_NOT_ALLOWED');
+          reject('empty inquiry body denied',()=>get('/api/demo/inquiry',{method:'POST',body:{subject:'架空',body:' '}}),'BODY_INVALID');
+          const inquiry=get('/api/demo/inquiry',{method:'POST',body:{subject:'架空の相談',body:'架空の説明',category:'tax_consultation'}});
+          ok('valid inquiry local only',()=>assert(inquiry.notice.includes('送信は行われません')));
+          ok('inquiry added only to tab memory',()=>assert.equal(admin('/api/admin/inquiries').inquiries.length,2));
+          const cid=S.snapshot().clients[0].id;
+          ok('same-client detail filters',()=>{const x=admin('/api/admin/clients/'+cid);assert(x.appointments.every(a=>a.client_id===cid));});
+          reject('cross-client relationship denied',()=>admin('/api/admin/tasks',{method:'POST',body:{title:'架空タスク',client_id:S.snapshot().clients[1].id,case_id:S.snapshot().cases[0].id}}),'CASE_CLIENT_SCOPE_DENIED');
+          reject('invalid date rejected',()=>admin('/api/admin/tasks',{method:'POST',body:{title:'架空タスク',due_at:'2026-02-30'}}),'INVALID_DEMO_DUE_DATE');
+          reject('generic admin appointment create prohibited',()=>admin('/api/admin/appointments',{method:'POST',body:{requester_name:'架空'}}),'DEMO_SIDE_EFFECT_BLOCKED');
+          reject('generic inquiry create prohibited',()=>admin('/api/admin/inquiries',{method:'POST',body:{subject:'架空'}}),'DEMO_SIDE_EFFECT_BLOCKED');
+          reject('client deletion prohibited',()=>admin('/api/admin/clients/'+cid,{method:'DELETE'}),'DEMO_CLIENT_DELETE_DENIED');
+          reject('unknown admin route denied',()=>admin('/api/admin/fake-unsafe-route',{method:'POST',body:{}}),'DEMO_SIDE_EFFECT_BLOCKED');
+          ok('only two accepted writes audited',()=>assert.equal(S.audit().length,2));
+          ok('independent session starts without written records',()=>{const x=make();assert.equal(x.audit().length,0);assert.equal(x.request('/api/admin/appointments',{adminKey:'1234'}).appointments.length,1);});
+          ok('snapshots are detached copies',()=>{const c=S.snapshot();c.clients[0].legal_name='changed';assert.notEqual(S.snapshot().clients[0].legal_name,'changed');});
+          console.log(`R141_SUMMARY ${passed} tests; source Git blob ${sha}; exit=${process.exitCode||0}`);
+          if(process.exitCode)process.exit(1);
+          NODE
+          node "$RUNNER_TEMP/r142_unit.cjs" "$GITHUB_WORKSPACE/R117_DEMO_engine.js"
+
+      - name: Report tested status and strict release isolation
+        if: success()
+        shell: bash
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## R142 release lock PASS — standalone synthetic demo only
+          - All nine published demo files match approved source Git blobs.
+          - 71 read-only static/CSP tests and 55 offline synthetic API tests passed (126 total).
+          - No customer accounts, backend endpoints, LINE messages, production API, or secrets were accessed.
+          - This does not prove production tenant deployment or replace browser E2E.
+          - This workflow **never pushes branches, merges, deploys Workers, or runs SQL.**
+          EOF
